@@ -17,6 +17,75 @@ import org.junit.runner.RunWith
 /** Explicit opt-in: changes live CPU settings and kills only this app's privileged host. */
 @RunWith(AndroidJUnit4::class)
 class MinimumProtectionInstrumentationTest {
+    /** Opt-in regression for OEM permission resets; restore all initial ceilings/modes. */
+    @Test fun writableOemReset_reappliesWithoutStockRoundTrip() {
+        assumeTrue(InstrumentationRegistry.getArguments().getString("minimumPermissionReset") == "1")
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val method = PServerExecutionMethod()
+        assumeTrue(method.probe().isAvailable)
+        val client = ClusterTuneHostClient(context, PrivilegedExecutionResolver(listOf(method), listOf(method.id)))
+        client.ensureStarted(5_000).getOrThrow()
+        val initial = client.readSnapshot().getOrThrow()
+        val cpus = initial.capabilities.cpus
+        fun modes() = cpus.map { Os.stat(it.minPath).st_mode and 0x1ff }
+        val originalModes = modes()
+        assumeTrue("minimums already owned externally", originalModes.all { it and 0x92 != 0 })
+        val ceilings = cpus.map { cpu -> cpu.supportedFrequencies.filter { it < cpu.selectableMax }.max() }
+        fun request(values: List<Long>, stock: Boolean = false, maxOnly: Boolean = false) =
+            ApplyRequest(values, null, stock, cpuIds = cpus.map { it.id }, maximumsOnly = maxOnly)
+        val report = File(context.filesDir, "minimum-reset-report.txt")
+        report.writeText("initial=${initial.state}; modes=$originalModes\n")
+
+        fun resetPermissions(resetModes: List<Int>) {
+            val script = File(context.filesDir, "minimum-reset-test.sh")
+            val marker = File(context.filesDir, "minimum-reset-done.txt")
+            marker.delete()
+            script.writeText(buildString {
+                appendLine("#!/system/bin/sh")
+                appendLine("set -e")
+                cpus.forEachIndexed { index, cpu ->
+                    require(cpu.minPath.matches(Regex("/sys/devices/system/cpu/cpufreq/policy[0-9]+/scaling_min_freq")))
+                    appendLine("chmod ${Integer.toOctalString(resetModes[index])} '${cpu.minPath}'")
+                }
+                appendLine("echo done > '${marker.path}'")
+                appendLine("chmod 644 '${marker.path}'")
+            })
+            try {
+                RootExec().launchHost("sh '${script.path}'").getOrThrow()
+                repeat(50) { if (!marker.exists()) Thread.sleep(100) }
+                assertTrue("permission reset script failed", marker.exists())
+                assertEquals(resetModes, modes())
+            } finally { script.delete(); marker.delete() }
+        }
+
+        try {
+            client.applyProfile(request(ceilings)).getOrThrow()
+            for (mode in listOf(420, 436, 420)) { // 0644 / 0664, as seen across OEM transitions.
+                resetPermissions(cpus.map { mode })
+                // A maximum-only reset models the other half of a firmware profile change.
+                client.applyProfile(request(cpus.map { it.stockMax }, stock = true, maxOnly = true)).getOrThrow()
+                client.applyProfile(request(ceilings)).getOrThrow()
+                assertEquals(ceilings, client.readSnapshot().getOrThrow().state.cpuMax)
+                assertEquals(cpus.map { mode and 0x16d }, modes())
+                report.appendText("recovered mode=$mode; state=${client.readSnapshot().getOrThrow().state}\n")
+            }
+            repeat(10) {
+                Thread.sleep(1_000)
+                assertEquals(ceilings, client.readSnapshot().getOrThrow().state.cpuMax)
+                assertEquals(cpus.map { 292 }, modes())
+            }
+            client.applyProfile(request(cpus.map { it.stockMax }, stock = true)).getOrThrow()
+            assertEquals(cpus.map { 420 }, modes())
+            report.appendText("Stock released latest mode=0644\n")
+        } finally {
+            client.applyProfile(request(cpus.map { it.stockMax }, stock = true)).getOrThrow()
+            client.applyProfile(request(initial.state.cpuMax, maxOnly = true)).getOrThrow()
+            client.stop().getOrThrow()
+            resetPermissions(originalModes)
+            report.appendText("cleanup restored initial ceilings and modes\n")
+        }
+    }
+
     @Test fun protectedProfiles_releaseOnStockStopAndRecoverAfterHostKill() {
         assumeTrue(InstrumentationRegistry.getArguments().getString("minimumProtection") == "1")
         val digest = MessageDigest.getInstance("SHA-256").digest(File("/system/bin/pservice").readBytes())

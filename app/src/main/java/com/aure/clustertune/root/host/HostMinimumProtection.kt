@@ -112,23 +112,32 @@ class HostMinimumProtection internal constructor(
         // Reject malformed targets/identities before acquiring any minimum permissions.
         val targets = engine.validateProfileTargets(capabilities, request)
         val desired = capabilities.cpus.filterIndexed { index, _ -> !targets.cpuStock[index] }
-        val previousIds = owned.keys.toSet()
+        val previousIds = owned.keys.toMutableSet()
         try {
             desired.forEach { cpu ->
                 val index = capabilities.cpus.indexOf(cpu)
                 val floor = cpu.minimumCandidates.filter { it > 0 && it <= targets.cpuSafetyCeilings[index] }.minOrNull()
                     ?: error("no supported minimum for ${cpu.id}")
                 val existing = owned[cpu.id]
-                if (existing != null) {
-                    check(fs.mode(cpu.minPath) == protectedMode(existing.originalMode)) {
-                        "CPU minimum protection changed externally for ${cpu.id}; release the profile before retrying"
-                    }
+                val mode = fs.mode(cpu.minPath) ?: error("cannot read minimum permissions for ${cpu.id}")
+                if (existing != null && mode == protectedMode(existing.originalMode)) {
                     return@forEach
                 }
-                val mode = fs.mode(cpu.minPath) ?: error("cannot read minimum permissions for ${cpu.id}")
+                // OEM mode/sleep transitions can restore writable sysfs permissions (including
+                // a different mode, e.g. 0664 -> 0644 on Odin 3). The old protection no longer
+                // exists: reacquire it on this explicit apply, using the current mode as the
+                // new recovery baseline. A different read-only owner is never taken over.
                 check(mode and WRITE_BITS != 0) { "${cpu.id} minimum is protected by another owner" }
                 owned[cpu.id] = ProtectedMinimum(cpu.id, mode)
-                persist() // Must reach disk before even the first chmod/write.
+                try {
+                    persist() // Must reach disk before even the first chmod/write.
+                } catch (failure: Throwable) {
+                    if (existing == null) owned.remove(cpu.id) else owned[cpu.id] = existing
+                    throw failure
+                }
+                // Reacquisition is new ownership too: release it if this apply fails, rather
+                // than keeping a new permission lock on behalf of the superseded profile.
+                previousIds.remove(cpu.id)
                 check(fs.mutate(listOf(
                     HostMutation.Chmod(cpu.minPath, mode or OWNER_WRITE),
                     HostMutation.WriteCandidatesNoReadback(cpu.minPath, listOf(floor.toString())),

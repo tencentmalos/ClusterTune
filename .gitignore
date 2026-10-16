@@ -9,3 +9,4 @@ app/build/
 captures/
 .kotlin/
 .local/
+local-debug/

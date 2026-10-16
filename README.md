@@ -10,6 +10,16 @@
 
 ClusterTune sets maximum CPU and GPU frequencies on Android handhelds.
 
+## Odin 3 recovery branch
+
+This fork's `codex/odin3-profile-recovery` branch fixes repeated profile-apply
+failures after writable CPU minimum permissions are restored externally. It is
+based on upstream 1.3.0. The fix, regression results, isolated build/install steps,
+AVG settings, and rollback procedure are documented in the
+[Odin 3 recovery guide](docs/odin3-minimum-permission-recovery.md).
+The upstream download below does not contain this branch's fix; build this branch
+with `-I scripts/odin-fix.gradle` for the separately installed test package.
+
 > [!WARNING]
 > Changing CPU or GPU limits can affect stability, performance, temperature, and battery life. Start with tested values and use **Stock** to restore normal limits.
 
@@ -93,6 +103,11 @@ Auto Tune waits through static menus or loading screens that produce no fresh fr
 
 * No execution method found: confirm that PServer is available or that the root manager provides `su`, then run detection again from Settings.
 * Profile controls missing: check Display over other apps.
+* Repeated `CPU minimum protection changed externally` failures on 1.3.0: this
+  branch reacquires writable minimum nodes on the next profile application and
+  preserves the new permission baseline for Stock/release. See the
+  [Odin 3 recovery guide](docs/odin3-minimum-permission-recovery.md) for validation
+  and limits; this does not add continuous profile enforcement.
 * Assigned app not switching profiles: confirm its assignment, Accessibility, and Notifications.
 * **App automation needs attention**: accessibility access is still enabled, but the service is disconnected or its app-detection worker is unhealthy. In Accessibility settings, turn ClusterTune's app profile service off and on. If it recurs after closing the app, check the device's background activity or battery restrictions. ClusterTune retries transient window/storage failures and waits briefly before showing this message. See the [accessibility audit](docs/accessibility-audit-2026-10-02.md) for tested recovery paths and remaining limits.
 * Auto Tune stops while an app is open: check the Auto Tune status card. Some vendor builds do not expose usable SurfaceFlinger frame statistics or GPU telemetry; include the reported frame backend and error when filing an issue.

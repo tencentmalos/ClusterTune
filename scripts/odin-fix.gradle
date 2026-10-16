@@ -1,0 +1,10 @@
+// Opt-in isolated debug package for testing this fork alongside an upstream installation.
+// Usage: ./gradlew -I scripts/odin-fix.gradle assembleDebug assembleDebugAndroidTest
+allprojects {
+    afterEvaluate { project ->
+        if (project.plugins.hasPlugin('com.android.application')) {
+            project.android.buildTypes.debug.applicationIdSuffix = '.odinfix'
+            project.android.buildTypes.debug.versionNameSuffix = '-odinfix1'
+        }
+    }
+}

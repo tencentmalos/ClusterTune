@@ -54,6 +54,76 @@ class HostMinimumProtectionTest {
         assertEquals(listOf("policy3"), store.record!!.nodes.map { it.policyId })
     }
 
+    @Test fun `writable OEM reset can be reacquired and Stock restores the new permissions`() {
+        val fs = FakeFs().apply { modes["policy0/min"] = 436 } // Odin: 0664 before protection.
+        val store = Store(); val manager = manager(fs, store)
+        manager.applyOrThrow(HostApplyEngine(fs), caps, request())
+        fs.modes["policy0/min"] = 420 // OEM resets to 0644, not the original 0664.
+        fs.values["policy0/min"] = "500"
+        fs.values["policy0/max"] = "800"
+        manager.applyOrThrow(HostApplyEngine(fs), caps, request(200))
+        assertEquals("100", fs.values["policy0/min"])
+        assertEquals("200", fs.values["policy0/max"])
+        assertEquals(292, fs.modes["policy0/min"])
+        assertEquals(420, store.record!!.nodes.single().originalMode)
+        manager.applyOrThrow(HostApplyEngine(fs), caps, request(800, 800, stock = true))
+        assertEquals(420, fs.modes["policy0/min"])
+        assertTrue(store.record!!.nodes.isEmpty())
+    }
+
+    @Test fun `same-mode OEM reset rewrites the floor before protecting again`() {
+        val fs = FakeFs(); val manager = manager(fs)
+        manager.applyOrThrow(HostApplyEngine(fs), caps, request())
+        fs.modes["policy0/min"] = 432
+        fs.values["policy0/min"] = "500"
+        manager.applyOrThrow(HostApplyEngine(fs), caps, request(200))
+        assertEquals("100", fs.values["policy0/min"])
+        assertEquals(288, fs.modes["policy0/min"])
+    }
+
+    @Test fun `external read-only replacement is preserved and refuses reacquisition`() {
+        val fs = FakeFs(); val manager = manager(fs)
+        manager.applyOrThrow(HostApplyEngine(fs), caps, request())
+        fs.modes["policy0/min"] = 292
+        fs.operations.clear()
+        assertThrows(HostApplyFailure::class.java) {
+            manager.applyOrThrow(HostApplyEngine(fs), caps, request(200))
+        }
+        assertTrue(fs.operations.isEmpty())
+        assertEquals(292, fs.modes["policy0/min"])
+    }
+
+    @Test fun `failed ceiling after reacquisition releases the new minimum ownership`() {
+        val fs = FakeFs(); val store = Store(); val manager = manager(fs, store)
+        manager.applyOrThrow(HostApplyEngine(fs), caps, request())
+        fs.modes["policy0/min"] = 420
+        fs.reject = { path, value -> path == "policy0/max" && value == "200" }
+        val failure = assertThrows(HostApplyFailure::class.java) {
+            manager.applyOrThrow(HostApplyEngine(fs), caps, request(200))
+        }
+        assertTrue(failure.rollbackComplete)
+        assertEquals(420, fs.modes["policy0/min"])
+        assertTrue(store.record!!.nodes.isEmpty())
+        assertEquals("400", fs.values["policy0/max"])
+    }
+
+    @Test fun `reacquisition journal failure does not write sysfs and remains retryable`() {
+        val fs = FakeFs(); val store = Store(); val manager = manager(fs, store)
+        manager.applyOrThrow(HostApplyEngine(fs), caps, request())
+        fs.modes["policy0/min"] = 420
+        fs.operations.clear()
+        store.failSave = true
+        assertThrows(HostApplyFailure::class.java) {
+            manager.applyOrThrow(HostApplyEngine(fs), caps, request(200))
+        }
+        assertTrue(fs.operations.isEmpty())
+        assertEquals(420, fs.modes["policy0/min"])
+        store.failSave = false
+        manager.applyOrThrow(HostApplyEngine(fs), caps, request(200))
+        assertEquals(420, store.record!!.nodes.single().originalMode)
+        assertEquals("200", fs.values["policy0/max"])
+    }
+
     @Test fun `maximum-only path does not acquire or release minimum protection`() {
         val fs = FakeFs(); val manager = manager(fs)
         manager.applyOrThrow(HostApplyEngine(fs), caps, request())
